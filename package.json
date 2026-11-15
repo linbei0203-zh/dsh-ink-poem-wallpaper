@@ -1,0 +1,54 @@
+{
+  "name": "dsh-ink-poem-wallpaper",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Ink-wash poetry wallpaper for DeepSeek Harness: a daily couplet from the Chinese poetry corpus, set in calligraphy on a generated ink-wash landscape.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "wallpaper",
+    "chinese-poetry",
+    "ink-wash"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./fonts/*": "./fonts/*"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "fonts/*.woff2",
+    "fonts/OFL.txt",
+    "fonts/*.webp",
+    "src"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OWNER/REPO.git"
+  },
+  "homepage": "https://github.com/OWNER/REPO#readme",
+  "bugs": {
+    "url": "https://github.com/OWNER/REPO/issues"
+  }
+}

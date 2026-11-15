@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Ink poem wallpaper",
+    "description": "Paints an ink-wash landscape behind the app and sets a classical Chinese couplet into a corner of it, drawn at random each day, with manual switching.\n\nVerses come from the chinese-poetry corpus, each attributed as dynasty · poet · title. The painting is generated from the verse's own imagery: a moonlit line grows a moon and distant ranges, a river line grows water, a reflection and a lone boat, a mountain line layers three ranges with brush texture.\n\nThe verse can be dragged anywhere; its position is remembered as a fraction of the window and every later quote stays put. Four size presets. All four faces (行楷 / 草书 / 行草 / 行书) are subset to every character in the pool, so no glyph can fail to draw.\n\nThe red seal is a fixed Qin-dynasty bird-worm script stamp (square and round plates, its border re-cut to the wear of a real stone); it can be dragged and scaled on its own.\n\nSettings live behind the ⚙ below the verse, revealed on hover. Everything is stored in the local browser only; the plugin makes no network requests and reads no page text.",
+    "detail": "docs/DETAIL.md"
+  }
+}

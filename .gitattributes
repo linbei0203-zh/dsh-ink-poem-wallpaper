@@ -1,0 +1,4 @@
+# Fonts and images are binary; keep git from trying to diff or merge them.
+*.woff2 binary
+*.webp  binary
+*.png   binary
