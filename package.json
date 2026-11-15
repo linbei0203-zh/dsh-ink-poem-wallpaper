@@ -27,6 +27,7 @@
     "NOTICE.md",
     "locale/*.json",
     "docs",
+    "screenshots.json",
     "icon.svg",
     "fonts/*.woff2",
     "fonts/OFL.txt",
