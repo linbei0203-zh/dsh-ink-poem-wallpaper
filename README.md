@@ -88,6 +88,10 @@ fonts/                四款字体子集 + 两张印面 + OFL
 locale/               中英文案
 docs/GUIDE.md         详细说明（构建、设计取舍）
 docs/DETAIL.md        插件详情页（单图，DSH 用）
+docs/DETAIL.zh.md     插件详情页（中文）
+docs/preview.png      README 与详情页用的预览图
+LICENSE               本项目代码的 MIT 许可
+NOTICE.md             第三方素材许可（字体 OFL、诗句 MIT）
 ```
 
 重新构建：
@@ -108,4 +112,4 @@ python3 src/make_seal.py round
 
 ## 许可
 
-代码 MIT。随附字体为 SIL OFL 1.1（见 `fonts/OFL.txt`），诗句数据来自 chinese-poetry（MIT）。详见 [LICENSE](LICENSE)。
+代码 MIT，见 [LICENSE](LICENSE)。随附字体为 SIL OFL 1.1（见 `fonts/OFL.txt`），诗句数据来自 chinese-poetry（MIT），逐项说明见 [NOTICE.md](NOTICE.md)。
