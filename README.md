@@ -90,6 +90,7 @@ docs/GUIDE.md         详细说明（构建、设计取舍）
 docs/DETAIL.md        插件详情页（单图，DSH 用）
 docs/DETAIL.zh.md     插件详情页（中文）
 docs/preview.png      README 与详情页用的预览图
+CHANGELOG.md          更新日志
 LICENSE               本项目代码的 MIT 许可
 NOTICE.md             第三方素材许可（字体 OFL、诗句 MIT）
 ```

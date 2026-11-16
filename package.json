@@ -1,6 +1,6 @@
 {
   "name": "dsh-ink-poem-wallpaper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": false,
   "type": "module",
   "description": "Ink-wash poetry wallpaper for DeepSeek Harness: a daily couplet from the Chinese poetry corpus, set in calligraphy on a generated ink-wash landscape.",
@@ -23,6 +23,7 @@
     "client.js",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE.md",
     "locale/*.json",

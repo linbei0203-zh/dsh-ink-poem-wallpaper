@@ -54,3 +54,14 @@ Every day a Chinese classical couplet is set into a generated ink-wash landscape
 - 行楷用的是系统字体（macOS 自带 Xingkai SC）。Windows / Linux 上会先找「华文行楷」等同类字体，都没有才退回楷体；此时设置面板会提示「本机没有安装毛笔字体」。草书 / 行草 / 行书三款随插件附带，跨平台一致。
 - 背景画在页面画布上，会话、卡片、输入框保持原有不透明度；只有大块空白处透出山水。若你另外装了会改页面配色的皮肤插件（例如海洋皮肤），两者会争抢同一层背景，建议只开一个。
 - 诗句、字形、画面都在本机生成，不发网络请求。朱印是随插件附带的两张印面图（方印 / 圆印各一张），由 Host 半端从本地 `/ink-poem-wallpaper/` 路径提供，同样不联网。
+
+## 出问题时
+
+插件把最近的状态写在页面 `localStorage` 的两个键里，排查时直接读它们，比看截图准：
+
+- `dsh-ipw-poem:last-error` —— 最近一次渲染错误的 `message` / `stack` / `componentStack`，以及出错时的窗口尺寸和时间。这个键不存在，就说明没崩过。
+- `dsh-ipw-poem:trace` —— 环形缓冲（最多 60 条，`geom` 几何记录最多保留 24 条），记录 `mount` / `unmount` / `render-error` / `geom` 四类事件，每条带时间和窗口尺寸。`geom` 里是那次渲染算出来的版面：`viewport`、对话区 `band`、诗句框 `anchor`、`orientation`（`v` 竖排 / `h` 横排）、字号、贴哪一侧，以及实测的 `measured` 尺寸。
+
+判断方法：只有 `render-error`、没有 `unmount`，是条目出错被摘掉了；只有 `unmount`、没有错误，是条目被卸载了；两者都没有而屏幕上没有诗句，就是几何算到了窗口外面（对比 `geom.anchor` 和 `geom.viewport` 即可）。
+
+背景样式表现在挂在 `<head>` 里的一个 `<style id="dsh-ipw-poem-style">` 节点上，由插件自身持有。即使诗句那一层出了问题，纸和山水也会照常画——如果连背景都没了，说明整个插件没被加载，而不是渲染出错。
