@@ -592,6 +592,42 @@ window.__ModuleLoader__.load({
     }
 
     /* ================================================================== *
+     * Page stylesheet
+     * ================================================================== */
+
+    // The painting is a stylesheet rule on `html` / `body`, so the `<style>` node must
+    // not be owned by the slot entry. A slot entry can be unmounted, re-rendered by an
+    // unrelated shell change, or abdicated after a render failure while the page keeps
+    // running; a `<style>` living in that subtree is removed with it, which leaves
+    // `body` transparent and lets the shell's own opaque fallback paint through — the
+    // wallpaper looks switched off until the plugin is reopened. One node, mounted and
+    // removed by the plugin effect, keeps the paint alive exactly as long as the
+    // plugin is loaded.
+    const STYLE_ID = 'dsh-ipw-poem-style'
+
+    function ensureStyleNode() {
+      if (typeof document === 'undefined' || !document.head) return null
+      const existing = document.getElementById(STYLE_ID)
+      if (existing) return existing
+      const node = document.createElement('style')
+      node.id = STYLE_ID
+      node.setAttribute('data-dsh-ink-poem-style', '')
+      document.head.appendChild(node)
+      return node
+    }
+
+    function writeStyles(css) {
+      const node = ensureStyleNode()
+      if (!node || node.textContent === css) return
+      node.textContent = css
+    }
+
+    function removeStyleNode() {
+      if (typeof document === 'undefined') return
+      document.getElementById(STYLE_ID)?.remove()
+    }
+
+    /* ================================================================== *
      * Layout measurement
      * ================================================================== */
 
@@ -771,7 +807,6 @@ window.__ModuleLoader__.load({
               whiteSpace: 'nowrap',
             },
           }, meta) : null,
-          seal,
         ].filter(Boolean)),
       ])
     }
@@ -957,6 +992,21 @@ window.__ModuleLoader__.load({
       const measuredRef = React.useRef(null)
       const blockRef = React.useRef(null)
       const [, forceMeasure] = React.useState(0)
+      // Holds the latest stylesheet text. Kept in a ref so the effect below can write
+      // it without a second render pass, and so the paint is refreshed even when the
+      // entry re-renders for a reason unrelated to the quote (a resize, a hover).
+      const stylesRef = React.useRef('')
+      // The geometry this render resolved, published by the layout effect below and
+      // recorded only when it actually changed.
+      const geomRef = React.useRef(null)
+
+      // Breadcrumbs. A missing verse is either an abdicated entry (error recorded,
+      // no unmount) or an unmounted one (unmount recorded, no error); without these
+      // two records the two cases are indistinguishable after the fact.
+      React.useEffect(() => {
+        trace('mount')
+        return () => trace('unmount')
+      }, [])
 
       const update = React.useCallback((patch) => {
         setSettings((current) => {
@@ -968,33 +1018,80 @@ window.__ModuleLoader__.load({
 
       // Follow viewport size, the app's light/dark switch, and layout shifts that
       // move the reading band (sidebar collapse, docked rightbar, window resize).
+      //
+      // The window `resize` event alone is not enough. The paper is painted by CSS,
+      // which re-resolves against the real window on every frame, while the verse is
+      // placed from the viewport size held in React state — so if the shell ever
+      // resizes without delivering `resize` (a transparent / vibrancy window can),
+      // the paint follows the window and the verse keeps its old coordinates, landing
+      // outside the window. An element observer cannot go stale that way: it fires
+      // from layout, not from an event the embedder has to forward.
       React.useEffect(() => {
+        let frame = 0
         const remeasure = () => {
           const size = { w: window.innerWidth, h: window.innerHeight }
-          setViewport(size)
-          setBand(contentBand(size))
+          setViewport((previous) => (
+            previous.w === size.w && previous.h === size.h ? previous : size
+          ))
+          setBand((previous) => {
+            const next = contentBand(size)
+            return Math.abs(previous.left - next.left) < 0.5
+              && Math.abs(previous.right - next.right) < 0.5
+              ? previous
+              : next
+          })
         }
-        window.addEventListener('resize', remeasure)
+        // Coalesce bursts (a drag fires the observer on every frame), but never let
+        // the coalescing be the reason a measurement is missed: an occluded or
+        // backgrounded Electron window stops delivering animation frames, so a
+        // frame-only schedule can starve. The timer runs either way and clears the
+        // pending frame.
+        let timer = 0
+        const flush = () => {
+          if (timer !== 0) { window.clearTimeout(timer); timer = 0 }
+          if (frame !== 0) { window.cancelAnimationFrame(frame); frame = 0 }
+          remeasure()
+        }
+        const schedule = () => {
+          if (timer !== 0) return
+          timer = window.setTimeout(flush, 120)
+          frame = window.requestAnimationFrame(() => {
+            frame = 0
+            flush()
+          })
+        }
+        window.addEventListener('resize', schedule)
+        window.visualViewport?.addEventListener('resize', schedule)
+        // The document element is sized by the viewport, so this tracks the window
+        // even when no resize event reaches the page.
+        const viewportObserver = typeof ResizeObserver === 'function'
+          ? new ResizeObserver(schedule)
+          : null
+        viewportObserver?.observe(document.documentElement)
         const observer = new MutationObserver(() => {
           setDarkApp(document.body.hasAttribute('data-ds-dark-theme'))
-          remeasure()
+          schedule()
         })
         observer.observe(document.body, {
           attributes: true,
           attributeFilter: ['data-ds-dark-theme', 'data-sidebar-collapsed', 'data-rightbar-collapsed', 'data-rightbar-fullscreen'],
         })
         // The frame owns the column geometry; watch it too, then settle once.
-        const frame = document.querySelector('[data-shell-overlay]')?.parentElement
-        const frameObserver = frame ? new MutationObserver(remeasure) : null
-        if (frame && frameObserver) {
-          frameObserver.observe(frame, { attributes: true, attributeFilter: ['style', 'data-sidebar-collapsed'] })
+        const frameNode = document.querySelector('[data-shell-overlay]')?.parentElement
+        const frameObserver = frameNode ? new MutationObserver(schedule) : null
+        if (frameNode && frameObserver) {
+          frameObserver.observe(frameNode, { attributes: true, attributeFilter: ['style', 'data-sidebar-collapsed'] })
         }
         const settle = window.setTimeout(remeasure, 250)
         return () => {
-          window.removeEventListener('resize', remeasure)
+          window.removeEventListener('resize', schedule)
+          window.visualViewport?.removeEventListener('resize', schedule)
+          viewportObserver?.disconnect()
           observer.disconnect()
           frameObserver?.disconnect()
           window.clearTimeout(settle)
+          if (timer !== 0) window.clearTimeout(timer)
+          if (frame !== 0) window.cancelAnimationFrame(frame)
         }
       }, [])
 
@@ -1042,7 +1139,27 @@ window.__ModuleLoader__.load({
         }
       })
 
-      if (!settings.enabled) return null
+      // Publish the page stylesheet. Declared before the early return so the hook
+      // order never depends on `settings.enabled`, and run as a layout effect so the
+      // rules are in place before the browser paints the frame — the old `<style>`
+      // child got that ordering for free from React's commit phase.
+      React.useLayoutEffect(() => {
+        writeStyles(stylesRef.current)
+        const geometry = geomRef.current
+        if (geometry !== null && geometry.signature !== lastGeomSignature) {
+          lastGeomSignature = geometry.signature
+          trace('geom', geometry.detail)
+        }
+      })
+
+      if (!settings.enabled) {
+        // Nothing to paint: drop the rules so the page falls back to the shell's own
+        // fills instead of keeping the last rendered scene. The layout effect above
+        // writes the empty string on this same pass.
+        latestStyles = ''
+        stylesRef.current = ''
+        return null
+      }
 
       const today = dayNumber(new Date())
       const pinned = settings.offset !== null && settings.pinnedDay === today
@@ -1168,6 +1285,35 @@ window.__ModuleLoader__.load({
             top,
           }
 
+      // The numbers behind the verse box. A verse that is missing from a screenshot is
+      // either an entry the shell replaced (the guard records an error) or a box that
+      // was placed outside the window (no error, nothing on screen); only the measured
+      // geometry separates the two, so it rides along in the same trace.
+      const geometryDetail = {
+        viewport: { w: viewport.w, h: viewport.h },
+        band: { left: Math.round(band.left), right: Math.round(band.right) },
+        anchor: {
+          left: Math.round(anchorRect.left),
+          top: Math.round(anchorRect.top),
+          width: Math.round(anchorWidth),
+        },
+        orientation: orientation ? 'v' : 'h',
+        sizePx,
+        side: freeX ? 'free' : anchorSide,
+        measured: known ? { w: Math.round(blockW), h: Math.round(blockH) } : null,
+        insets: INSET,
+      }
+      geomRef.current = {
+        signature: [
+          viewport.w, viewport.h,
+          Math.round(band.left), Math.round(band.right),
+          Math.round(anchorRect.left), Math.round(anchorRect.top),
+          orientation ? 'v' : 'h', sizePx, known ? Math.round(blockW) : -1,
+          freeX ? 'free' : anchorSide,
+        ].join('|'),
+        detail: geometryDetail,
+      }
+
       const painting = React.useMemo(
         () => svgUrl(sceneSvg(quote, tone, settings.density)),
         [quote.q, quote.a, tone, settings.density],
@@ -1217,6 +1363,8 @@ body.dsh-ipw-active {
 body.dsh-ipw-active[data-ds-dark-theme] {
   --dsw-specific-sidebar-fill: ${veil}0.5) !important;
 }`
+      latestStyles = styles
+      stylesRef.current = styles
 
       // --- free placement -------------------------------------------------
       // The verse block is dragged by its body. A drag stores the block's top-left
@@ -1373,8 +1521,6 @@ body.dsh-ipw-active[data-ds-dark-theme] {
       }, sealArt)
 
       return h(React.Fragment, null, [
-        h('style', { key: 'css' }, styles),
-
         h('div', { key: 'verse', style: anchor, 'data-dsh-ink-poem': '' },
           h('div', {
             ref: blockRef,
@@ -1652,6 +1798,159 @@ body.dsh-ipw-active[data-ds-dark-theme] {
       ].filter(Boolean))
     }
 
+    /* ================================================================== *
+     * Render guard
+     * ================================================================== */
+
+    // A slot entry that throws is replaced by the shell with an empty anchor, and the
+    // shell never retries it: the verse and the seal vanish from a page that keeps
+    // running (the stylesheet lives in <head>, so the paper survives) and only a
+    // reload brings them back. This guard does the two things the shell does not —
+    // it records what actually threw, and it retries the render instead of staying
+    // dead.
+    // The last stylesheet the component resolved. A crash anywhere below it in the
+    // tree (a verse child, the seal, the panel) aborts the render before any layout
+    // effect runs, so the head node would never receive the rules and the page would
+    // fall back to the shell's own opaque fill — the paper would go as well as the
+    // verse. The guard republishes this on the failure path so a broken child costs
+    // only the child.
+    let latestStyles = ''
+
+    const ERROR_KEY = 'dsh-ipw-poem:last-error'
+    const TRACE_KEY = 'dsh-ipw-poem:trace'
+    const RETRY_LIMIT = 8
+    const RETRY_DELAY = 600
+
+    // A ring buffer of lifecycle events. A crash record on its own cannot tell an
+    // abdicated entry from one the shell unmounted; this can, because an unmount
+    // leaves a breadcrumb and no error.
+    // The ring buffer lives in memory and reaches storage once per burst. Dragging a
+    // verse changes its geometry on every frame, and a synchronous `setItem` per frame
+    // is a write amplification the window drag can feel; the debounce collapses a
+    // whole gesture into a single write without losing the last state of it.
+    const TRACE_LIMIT = 60
+    const TRACE_GEOM_LIMIT = 24
+    const TRACE_FLUSH_DELAY = 400
+    let traceBuffer = null
+    let traceTimer = 0
+
+    function readTrace() {
+      if (traceBuffer !== null) return traceBuffer
+      try {
+        const raw = window.localStorage.getItem(TRACE_KEY)
+        traceBuffer = raw ? JSON.parse(raw) : []
+        if (!Array.isArray(traceBuffer)) traceBuffer = []
+      } catch {
+        traceBuffer = []
+      }
+      return traceBuffer
+    }
+
+    function trimTrace(list) {
+      const geoms = []
+      const rest = []
+      for (const entry of list) (entry && entry.event === 'geom' ? geoms : rest).push(entry)
+      const keptGeoms = geoms.slice(-TRACE_GEOM_LIMIT)
+      const keptRest = rest.slice(-(TRACE_LIMIT - keptGeoms.length))
+      // Rebuild in original order so the sequence still reads as a timeline.
+      const keep = new Set([...keptGeoms, ...keptRest])
+      return list.filter((entry) => keep.has(entry))
+    }
+
+    function flushTrace() {
+      if (traceTimer !== 0) {
+        window.clearTimeout(traceTimer)
+        traceTimer = 0
+      }
+      if (traceBuffer === null) return
+      try {
+        window.localStorage.setItem(TRACE_KEY, JSON.stringify(trimTrace(traceBuffer)))
+      } catch {
+        // Tracing must never be the reason the wallpaper breaks.
+      }
+    }
+
+    function trace(event, detail) {
+      try {
+        const list = readTrace()
+        const entry = {
+          at: new Date().toISOString(),
+          event,
+          w: window.innerWidth,
+          h: window.innerHeight,
+        }
+        if (detail !== undefined) entry.detail = detail
+        list.push(entry)
+        while (list.length > TRACE_LIMIT * 2) list.shift()
+        if (traceTimer === 0) {
+          traceTimer = window.setTimeout(flushTrace, TRACE_FLUSH_DELAY)
+        }
+      } catch {
+        // Tracing must never be the reason the wallpaper breaks.
+      }
+    }
+
+    // The last geometry signature written to the trace. Layout values are re-derived
+    // on every render; without this the ring buffer would hold nothing but repeats.
+    let lastGeomSignature = ''
+
+    function recordRenderError(error, info) {
+      try {
+        window.localStorage.setItem(ERROR_KEY, JSON.stringify({
+          at: new Date().toISOString(),
+          message: error && error.message ? String(error.message) : String(error),
+          stack: error && error.stack ? String(error.stack) : '',
+          componentStack: info && info.componentStack ? String(info.componentStack) : '',
+          w: window.innerWidth,
+          h: window.innerHeight,
+        }))
+        trace('render-error')
+        flushTrace()
+      } catch {
+        // Same: never throw out of the reporter.
+      }
+      console.error('[ink-poem-wallpaper] render failed:', error)
+    }
+
+    class InkWashGuard extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { failed: false, attempt: 0 }
+        this.timer = null
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true }
+      }
+
+      componentDidCatch(error, info) {
+        recordRenderError(error, info)
+        // Keep the painting: only the verse subtree failed, not the canvas.
+        if (latestStyles !== '') writeStyles(latestStyles)
+        this.retry()
+      }
+
+      componentWillUnmount() {
+        if (this.timer !== null) window.clearTimeout(this.timer)
+      }
+
+      retry() {
+        if (this.state.attempt >= RETRY_LIMIT) return
+        if (this.timer !== null) window.clearTimeout(this.timer)
+        this.timer = window.setTimeout(() => {
+          this.timer = null
+          this.setState((state) => ({ failed: false, attempt: state.attempt + 1 }))
+        }, RETRY_DELAY)
+      }
+
+      render() {
+        // While failed the painted canvas stays: the stylesheet is in <head>, so only
+        // the verse subtree is missing, and only for the retry window.
+        if (this.state.failed) return null
+        return h(InkWash)
+      }
+    }
+
     function clampNumber(value, min, max) {
       return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min))
     }
@@ -1667,12 +1966,18 @@ body.dsh-ipw-active[data-ds-dark-theme] {
         // show a fallback frame first.
         preloadFaces()
 
+        // The page canvas: the class hook, plus the one stylesheet node that carries
+        // the actual paint. Both live and die with the plugin rather than with the
+        // slot entry, so a re-render or an entry remount cannot drop the wallpaper
+        // while the plugin is still loaded.
         ctx.effect(() => {
           document.body.classList.add('dsh-ipw-active')
           document.documentElement.classList.add('dsh-ipw-active')
+          ensureStyleNode()
           return () => {
             document.body.classList.remove('dsh-ipw-active')
             document.documentElement.classList.remove('dsh-ipw-active')
+            removeStyleNode()
           }
         }, 'ink-poem-wallpaper: page canvas')
 
@@ -1680,7 +1985,7 @@ body.dsh-ipw-active[data-ds-dark-theme] {
           name: 'shell.overlay',
           id: 'ink-poem-wallpaper',
           order: -100,
-        }, InkWash))
+        }, InkWashGuard))
       },
     }
   },
