@@ -1,14 +1,17 @@
 /**
  * Host half of the ink-poem wallpaper bundle.
  *
- * The Client half draws everything; the Host has one job here: serve the brush
- * faces the verse is set in, plus the two seal plates. They are subset to exactly
- * the characters the quote pool uses, so a face is a few hundred kilobytes instead
- * of several megabytes, and glyph coverage is guaranteed by construction — a font
- * that is missing a character is what produces the garbled strokes this avoids.
+ * The Client half draws the wallpaper; the Host serves it: the brush faces the
+ * verse is set in, the two seal plates, and — since v1.2 — the page that opens
+ * when you ask for a poem's full text. Faces are subset to exactly the characters
+ * the quote pool uses, so a face is a few hundred kilobytes instead of several
+ * megabytes, and glyph coverage is guaranteed by construction — a font missing a
+ * character is what produces the garbled strokes this avoids.
  *
- * Faces are SIL Open Font License 1.1 (see fonts/OFL.txt); each is served from the
- * bundle so the wallpaper needs no network access.
+ * Everything is served from inside the bundle, so the wallpaper and the poem page
+ * both work with no network access. Faces are SIL Open Font License 1.1 (see
+ * fonts/OFL.txt); the poems, biographies and commentary come from chinese-poetry
+ * (MIT, see NOTICE.md).
  */
 import { readFile, realpath } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
@@ -18,24 +21,43 @@ export const name = 'dsh-ink-poem-wallpaper'
 export const inject = ['webServer']
 
 const ROUTE = '/ink-poem-wallpaper'
-const ASSET_ROOT = resolve(fileURLToPath(new URL('./fonts/', import.meta.url)))
+/** The poem page. An exact route, so it wins over the asset prefix below. */
+const PAGE_ROUTE = `${ROUTE}/poem`
+/** The same record as JSON, read by the in-app panel (see servePoemData). */
+const DATA_ROUTE = `${ROUTE}/poem.json`
 
-// Only these types are ever served. A name that resolves to something else — a
-// stray file dropped in fonts/, or a symlink — is refused rather than streamed.
-const MIME = Object.freeze({
-  '.woff2': 'font/woff2',
-  '.webp': 'image/webp',
-  '.txt': 'text/plain; charset=utf-8',
-})
+const FONT_ROOT = resolve(fileURLToPath(new URL('./fonts/', import.meta.url)))
+const DATA_ROOT = resolve(fileURLToPath(new URL('./data/', import.meta.url)))
+const DETAIL_FILE = resolve(DATA_ROOT, 'details.json')
 
 /**
- * The asset root with symlinks resolved, computed once.
+ * What may be served, and from where.
+ *
+ * Only these types are ever served. A name that resolves to something else — a
+ * stray file dropped in one of the directories, or a symlink — is refused rather
+ * than streamed.
+ */
+const ROOTS = Object.freeze([
+  {
+    dir: FONT_ROOT,
+    mime: Object.freeze({
+      '.woff2': 'font/woff2',
+      '.webp': 'image/webp',
+      '.txt': 'text/plain; charset=utf-8',
+    }),
+  },
+])
+// `data/` is deliberately absent: the detail records are read by the page
+// renderer in this process and never need to be reachable over HTTP.
+
+/**
+ * Each asset root with symlinks resolved, computed once.
  *
  * A plain `resolve()` only normalises `..`; it says nothing about symlinks, so a
- * link placed inside `fonts/` would pass a string prefix check and be read from
+ * link placed inside a root would pass a string prefix check and be read from
  * wherever it pointed. Comparing the *real* paths closes that.
  */
-const REAL_ROOT = realpath(ASSET_ROOT).catch(() => ASSET_ROOT)
+const REAL_ROOTS = ROOTS.map((entry) => realpath(entry.dir).catch(() => entry.dir))
 
 function finish(res, status, headers = {}) {
   res.writeHead(status, {
@@ -46,27 +68,24 @@ function finish(res, status, headers = {}) {
   res.end()
 }
 
+function send(res, req, status, type, body, cache = 'no-cache') {
+  res.writeHead(status, {
+    'cache-control': cache,
+    'content-length': String(body.byteLength),
+    'content-type': type,
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(req.method === 'HEAD' ? undefined : body)
+}
+
 /**
- * Serve one asset from `fonts/`.
+ * Serve one asset from `fonts/` or `data/`.
  *
- * Every path that is not a plain, known-type file directly inside the asset root
+ * Every path that is not a plain, known-type file directly inside a known root
  * answers 404 — including anything that throws while being read. Letting a read
  * error escape would leave the response unwritten and the request hanging.
  */
-async function serveAsset(req, res) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    finish(res, 405, { allow: 'GET, HEAD' })
-    return
-  }
-
-  let pathname
-  try {
-    pathname = decodeURIComponent(new URL(req.url ?? ROUTE, 'http://dsh.local').pathname)
-  } catch {
-    finish(res, 400)
-    return
-  }
-
+async function serveAsset(req, res, pathname) {
   const suffix = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(ROUTE.length + 1) : ''
   // One flat file name, no separators, no NUL. This also rejects every encoded
   // traversal form before it reaches the filesystem.
@@ -75,47 +94,352 @@ async function serveAsset(req, res) {
     return
   }
 
-  const type = MIME[extname(suffix).toLowerCase()]
-  if (type === undefined) {
-    finish(res, 404)
+  const ext = extname(suffix).toLowerCase()
+  for (let index = 0; index < ROOTS.length; index += 1) {
+    const type = ROOTS[index].mime[ext]
+    if (type === undefined) continue
+
+    const root = await REAL_ROOTS[index]
+    const target = resolve(root, suffix)
+    if (target === root || !target.startsWith(`${root}${sep}`)) continue
+
+    let body
+    try {
+      // Resolve the target too: a symlink inside the root must not lead out of it.
+      const real = await realpath(target)
+      if (!real.startsWith(`${root}${sep}`)) continue
+      body = await readFile(real)
+    } catch {
+      // Missing or unreadable: indistinguishable from absent for the caller, and
+      // it must not escape as a rejected promise.
+      continue
+    }
+
+    // The subsets only change when the bundle is rebuilt, so this is safe to
+    // cache for a day; the URL carries no revision, hence the modest max-age.
+    send(res, req, 200, type, body, 'public, max-age=86400')
     return
   }
 
-  try {
-    const root = await REAL_ROOT
-    const target = resolve(root, suffix)
-    if (target === root || !target.startsWith(`${root}${sep}`)) {
-      finish(res, 404)
-      return
-    }
-    // Resolve the target too: a symlink inside the root must not lead out of it.
-    const real = await realpath(target)
-    if (!real.startsWith(`${root}${sep}`)) {
-      finish(res, 404)
+  finish(res, 404)
+}
+
+/* ==================================================================== *
+ * Detail records
+ * ==================================================================== */
+
+/**
+ * `data/details.json`, parsed once per process.
+ *
+ * Keyed `"作者|篇名"`: the quote pool names a poem by its author and title, so
+ * that pair is the lookup the page needs. Generated by corpus/build/make_details.py,
+ * which is why a missing key is an ordinary outcome — only the poems the corpus
+ * could be matched to have an entry.
+ */
+let detailsPromise
+
+function loadDetails() {
+  if (detailsPromise === undefined) {
+    detailsPromise = readFile(DETAIL_FILE, 'utf8')
+      .then((text) => JSON.parse(text))
+      .catch(() => ({}))
+  }
+  return detailsPromise
+}
+
+/**
+ * The same record as JSON, for the in-app panel.
+ *
+ * The poem page is a document, and a document is the right shape for long prose
+ * in a browser. But the desktop app denies `window.open` for any scheme other
+ * than http(s) — the main window runs on `dsh-app://app`, where a relative
+ * `window.open` resolves to a `dsh-app:` URL the window-open handler refuses
+ * without ever reaching a browser. So the panel reads the record instead and
+ * lays it out inside the app, which works identically in both hosts.
+ */
+async function servePoemData(req, res, url) {
+  const author = (url.searchParams.get('a') || '').trim()
+  if (!author) {
+    finish(res, 400, { 'content-type': 'text/plain; charset=utf-8' })
+    return
+  }
+
+  const title = (url.searchParams.get('t') || '').trim()
+  const details = await loadDetails()
+  const record = details[`${author}|${title}`] || {}
+
+  const payload = {
+    d: record.d || '',
+    a: author,
+    t: title,
+    p: Array.isArray(record.p) ? record.p : [],
+    b: record.b || '',
+    bg: record.bg || '',
+  }
+
+  // Not cached: the panel is opened rarely, and a stale biography after a
+  // rebuild is a worse trade than one extra file read.
+  send(res, req, 200, 'application/json; charset=utf-8', Buffer.from(JSON.stringify(payload), 'utf8'))
+}
+
+/* ==================================================================== *
+ * The poem page
+ * ==================================================================== */
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch])
+}
+
+/** Punctuation ignored when locating the displayed couplet inside the full text. */
+const SKIP = new Set(Array.from(' \t\n\r，。、；：？！“”‘’（）【】…—·．,.;:?!"\'()[]《》'))
+
+function bare(text) {
+  let out = ''
+  const map = []
+  for (let index = 0; index < text.length; index += 1) {
+    if (SKIP.has(text[index])) continue
+    out += text[index]
+    map.push(index)
+  }
+  return { text: out, map }
+}
+
+/**
+ * Wrap the couplet the wallpaper is showing, so the reader can see where the line
+ * they are looking at sits in the poem. Fails quietly: a line with a textual
+ * variant simply is not marked.
+ */
+function markCouplet(line, couplet) {
+  const source = bare(line)
+  const needle = bare(couplet).text
+  if (!needle) return esc(line)
+  const at = source.text.indexOf(needle)
+  if (at < 0) return esc(line)
+  const start = source.map[at]
+  const end = source.map[at + needle.length - 1] + 1
+  return esc(line.slice(0, start))
+    + '<em class="mark">' + esc(line.slice(start, end)) + '</em>'
+    + esc(line.slice(end))
+}
+
+const STYLE = `
+@font-face{font-family:"Ink Poem Brush";src:url("${ROUTE}/longcang.woff2") format("woff2");font-display:swap;font-weight:400;font-style:normal}
+:root{
+  --paper:#f7f2e8;--paper-deep:#efe7d8;--ink:#1f1c18;--ink-soft:#544d44;
+  --ink-faint:#8a8177;--rule:rgba(31,28,24,.14);--seal:#a63b32;
+}
+@media (prefers-color-scheme:dark){
+  :root{--paper:#161310;--paper-deep:#1d1915;--ink:#ece5da;--ink-soft:#c3b9ab;
+    --ink-faint:#8d8375;--rule:rgba(236,229,218,.16);--seal:#d2645a}
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper);color:var(--ink);
+  font-family:"Songti SC","Source Han Serif SC","Noto Serif CJK SC",STSong,SimSun,Georgia,serif;
+  -webkit-font-smoothing:antialiased;line-height:1.9;
+  min-height:100vh;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(120% 70% at 50% -20%,var(--paper-deep) 0%,transparent 62%),
+    radial-gradient(80% 50% at 90% 105%,var(--paper-deep) 0%,transparent 58%);
+}
+.sheet{position:relative;z-index:1;max-width:720px;margin:0 auto;padding:72px 28px 96px}
+.head{text-align:center;padding-bottom:34px;border-bottom:1px solid var(--rule)}
+.dyn{
+  margin:0 0 14px;font-size:12px;letter-spacing:.42em;text-indent:.42em;
+  color:var(--ink-faint);text-transform:uppercase;
+}
+.title{
+  margin:0;font-family:"Ink Poem Brush","Xingkai SC",STKaiti,KaiTi,serif;
+  font-size:clamp(30px,6vw,44px);font-weight:400;letter-spacing:.06em;line-height:1.35;
+}
+.by{margin:12px 0 0;font-size:14px;letter-spacing:.3em;text-indent:.3em;color:var(--ink-soft)}
+.verse{margin:40px 0 8px;text-align:center}
+/* The full text uses the serif stack, not the brush faces: those are subset to
+   the characters the quote pool uses, and a poem's whole body runs far past that
+   subset (about 54% coverage) — a brush face here would draw tofu mid-poem. Only
+   the title keeps the brush, and the font filter guarantees its characters. */
+.verse p{
+  margin:0 0 .62em;font-family:"Songti SC","Source Han Serif SC","Noto Serif CJK SC",STSong,SimSun,serif;
+  font-size:clamp(17px,2.7vw,21px);line-height:2.05;letter-spacing:.055em;
+}
+.verse p:last-child{margin-bottom:0}
+.mark{font-style:normal;color:var(--seal);position:relative}
+.mark::after{
+  content:"";position:absolute;left:0;right:0;bottom:-.16em;height:1px;
+  background:currentColor;opacity:.36;
+}
+.note{
+  margin:26px auto 0;max-width:34em;text-align:center;font-size:12.5px;
+  color:var(--ink-faint);letter-spacing:.04em;
+}
+.block{margin-top:52px;padding-top:26px;border-top:1px solid var(--rule)}
+.block h2{
+  margin:0 0 16px;font-size:12px;font-weight:600;letter-spacing:.34em;text-indent:.34em;
+  color:var(--ink-faint);font-family:inherit;
+}
+.prose{margin:0;font-size:15px;line-height:2.05;color:var(--ink-soft);text-align:justify}
+.prose + .prose{margin-top:.9em}
+.empty{margin:0;font-size:14px;color:var(--ink-faint);font-style:italic}
+.seal{
+  margin:56px auto 0;width:52px;height:52px;border:1px solid var(--seal);
+  border-radius:4px;display:flex;align-items:center;justify-content:center;
+  color:var(--seal);font-family:"Ink Poem Brush",STKaiti,serif;font-size:19px;
+  letter-spacing:.04em;opacity:.78;line-height:1;
+}
+.foot{
+  margin-top:30px;text-align:center;font-size:11.5px;line-height:2;
+  color:var(--ink-faint);letter-spacing:.03em;
+}
+.foot a{color:inherit;text-decoration:none;border-bottom:1px solid var(--rule)}
+@media print{
+  body{background:#fff;color:#000}
+  body::before{display:none}
+  .sheet{padding:24px 0}
+  .seal{display:none}
+}
+`
+
+function renderPage({ dynasty, author, title, couplet, paragraphs, biography, background }) {
+  const heading = title ? `${author}《${title}》` : author
+  const verse = paragraphs.length
+    ? `<section class="verse">${paragraphs
+      .map((line) => `<p>${markCouplet(line, couplet)}</p>`)
+      .join('')}</section>`
+    : ''
+
+  const missing = paragraphs.length
+    ? ''
+    : '<p class="note">这首诗的正文未能与 chinese-poetry 语料比对成功，这里只保留壁纸上的那一联。</p>'
+
+  const coupletOnly = paragraphs.length
+    ? ''
+    : `<section class="verse"><p>${esc(couplet)}</p></section>`
+
+  const bio = biography
+    ? `<p class="prose">${esc(biography).replace(/\n+/g, '</p><p class="prose">')}</p>`
+    : '<p class="empty">暂无作者小传。</p>'
+
+  const bg = background
+    ? `<p class="prose">${esc(background).replace(/\n+/g, '</p><p class="prose">')}</p>`
+    : '<p class="empty">这首诗的创作背景暂无可靠的文字来源，此处不作推测。</p>'
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>${esc(heading)} — 水墨诗词壁纸</title>
+<style>${STYLE}</style>
+</head>
+<body>
+<main class="sheet">
+  <header class="head">
+    <p class="dyn">${esc(dynasty || '')}</p>
+    <h1 class="title">${esc(title || author)}</h1>
+    <p class="by">${esc(author)}</p>
+  </header>
+  ${verse}${coupletOnly}${missing}
+  <section class="block">
+    <h2>作者</h2>
+    ${bio}
+  </section>
+  <section class="block">
+    <h2>创作背景</h2>
+    ${bg}
+  </section>
+  <div class="seal" aria-hidden="true">詩</div>
+  <p class="foot">
+    诗句与作者小传取自 chinese-poetry 项目（MIT）；<br>
+    本页由「水墨诗词壁纸」插件生成，不联网、不收集任何信息。
+  </p>
+</main>
+</body>
+</html>`
+}
+
+async function servePoemPage(req, res, url) {
+  const author = (url.searchParams.get('a') || '').trim()
+  const title = (url.searchParams.get('t') || '').trim()
+  const couplet = (url.searchParams.get('q') || '').trim()
+
+  if (!author) {
+    finish(res, 400, { 'content-type': 'text/plain; charset=utf-8' })
+    return
+  }
+
+  const details = await loadDetails()
+  const record = details[`${author}|${title}`] || {}
+
+  // A missing record is not an error: the page still names the poem and shows
+  // the couplet, and says plainly that there is no more to show.
+  const page = renderPage({
+    dynasty: record.d || '',
+    author,
+    title,
+    couplet,
+    paragraphs: Array.isArray(record.p) ? record.p : [],
+    biography: record.b || '',
+    background: record.bg || '',
+  })
+
+  send(res, req, 200, 'text/html; charset=utf-8', Buffer.from(page, 'utf8'))
+}
+
+/* ==================================================================== *
+ * Plugin
+ * ==================================================================== */
+
+function route(kind, path, handler) {
+  return async (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      finish(res, 405, { allow: 'GET, HEAD' })
       return
     }
 
-    const body = await readFile(real)
-    res.writeHead(200, {
-      // The subset only changes when the bundle is rebuilt, so this is safe to cache
-      // for a day; the URL carries no revision, hence the modest max-age.
-      'cache-control': 'public, max-age=86400',
-      'content-length': String(body.byteLength),
-      'content-type': type,
-      'x-content-type-options': 'nosniff',
-    })
-    res.end(req.method === 'HEAD' ? undefined : body)
-  } catch {
-    // Missing, unreadable, or an invalid path: all indistinguishable from the
-    // caller's point of view, and none of them may escape as a rejected promise.
-    finish(res, 404)
+    let url
+    try {
+      url = new URL(req.url ?? path, 'http://dsh.local')
+    } catch {
+      finish(res, 400)
+      return
+    }
+
+    // The pathname arrives still percent-encoded; anything that does not decode
+    // into a real path is a malformed request, not a missing file.
+    try {
+      url.pathname = decodeURIComponent(url.pathname)
+    } catch {
+      finish(res, 400)
+      return
+    }
+
+    await handler(req, res, url)
   }
 }
 
 export function apply(ctx) {
   ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: DATA_ROUTE,
+    handler: route('exact', DATA_ROUTE, (req, res, url) => servePoemData(req, res, url)),
+  }), 'ink-poem-wallpaper: poem data')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PAGE_ROUTE,
+    handler: route('exact', PAGE_ROUTE, (req, res, url) => servePoemPage(req, res, url)),
+  }), 'ink-poem-wallpaper: poem page')
+
+  ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE,
-    handler: serveAsset,
+    handler: route('prefix', ROUTE, (req, res, url) => serveAsset(req, res, url.pathname)),
   }), 'ink-poem-wallpaper: asset route')
 }

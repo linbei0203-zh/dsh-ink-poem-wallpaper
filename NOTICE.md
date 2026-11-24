@@ -22,10 +22,23 @@ outlines are unchanged, the Reserved Font Name terms are not triggered.
 
 ## Poetry corpus — MIT
 
-`src/quotes.compact.json` is derived from
+`src/quotes.compact.json` and `data/details.json` are derived from
 [chinese-poetry](https://github.com/chinese-poetry/chinese-poetry) (MIT),
 filtered and corrected as described in [docs/GUIDE.md](docs/GUIDE.md).
 The poems themselves are classical Chinese verse in the public domain.
+
+`data/details.json` additionally carries, for each poem it could be matched to:
+
+- the full text, from `全唐诗/` and `宋词/`;
+- the poet's biography, from `全唐诗/authors.tang.json` (classical Chinese) and
+  `宋词/author.song.json` (modern Chinese);
+- commentary where available, from `水墨唐诗/shuimotangshi.json`, whose
+  `prologue` field is the only prose commentary the corpus provides.
+
+Traditional characters are reduced to simplified with
+[OpenCC](https://github.com/BYVoid/OpenCC) (Apache-2.0) at build time. Where the
+corpus has no full text or no commentary, the page says so instead of filling the
+gap; nothing in this data is written by the plugin itself.
 
 ## Seal artwork
 

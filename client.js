@@ -872,6 +872,9 @@ window.__ModuleLoader__.load({
       prev: 'M19 12H6m5.5-5.5L6 12l5.5 5.5',
       next: 'M5 12h13m-5.5-5.5L18 12l-5.5 5.5',
       close: 'M6 6l12 12M18 6L6 18',
+      // A page with a turned corner: "read the whole thing".
+      page: 'M7 3h7l4 4v14H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z'
+        + 'M14 3v4h4M9.5 12h5M9.5 16h5',
       gear: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z'
         + 'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1'
         + 'a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1'
@@ -969,6 +972,408 @@ window.__ModuleLoader__.load({
     }
 
     /* ================================================================== *
+     * The poem layer
+     * ================================================================== */
+
+    /**
+     * Where the data comes from.
+     *
+     * A relative URL, so it resolves against whatever origin the app is running
+     * on: `http://127.0.0.1:<port>` in a browser, `dsh-app://app` in the desktop
+     * shell. The shell forwards the latter to the Host with its own credentials,
+     * which is why the Client half can read the record without knowing the port.
+     */
+    const DATA_URL = `${FONT_BASE}/poem.json`
+
+    /**
+     * The server-rendered page for the same record.
+     *
+     * Used only when `DATA_URL` is not answered — a Host process started before
+     * the JSON route existed still serves this one, so the reader gets the poem
+     * without having to restart the app. Always relative, for the same reason as
+     * `DATA_URL`, and always same-origin, so the frame is not a cross-site embed.
+     */
+    const PAGE_URL = `${FONT_BASE}/poem`
+
+    /**
+     * Characters ignored when looking for the couplet inside a full line.
+     *
+     * The pool and the corpus punctuate independently — one may carry 「，」 where
+     * the other does not — so the comparison drops punctuation from both sides
+     * instead of demanding an exact substring.
+     */
+    const LAYER_SKIP = new Set(Array.from(' \t\n\r，。、；：？！“”‘’（）【】…—·．,.;:?!"\'()[]《》'))
+
+    function bareWithMap(text) {
+      let out = ''
+      const map = []
+      for (let index = 0; index < text.length; index += 1) {
+        if (LAYER_SKIP.has(text[index])) continue
+        out += text[index]
+        map.push(index)
+      }
+      return { text: out, map }
+    }
+
+    /**
+     * Longest common subsequence of two bare strings, as an alignment.
+     *
+     * The pool and the corpus were edited independently, so a couplet can differ
+     * from its full-text twin by a character or two — 犁/犂, 滚滚/衮衮, 忽如/忽然,
+     * 洛阳城/汉阳城. Those are the corpus's own readings, not our errors, and the
+     * poem on screen is the right poem; only the substring test fails. Aligning the
+     * two instead of demanding equality keeps the mark on the line it belongs to.
+     */
+    function align(source, needle) {
+      const rows = source.length + 1
+      const cols = needle.length + 1
+      const table = new Uint16Array(rows * cols)
+      for (let row = 1; row < rows; row += 1) {
+        for (let col = 1; col < cols; col += 1) {
+          table[row * cols + col] = source[row - 1] === needle[col - 1]
+            ? table[(row - 1) * cols + (col - 1)] + 1
+            : Math.max(table[(row - 1) * cols + col], table[row * cols + (col - 1)])
+        }
+      }
+      // Walk back from the corner, collecting the matched pairs.
+      const pairs = []
+      let row = source.length
+      let col = needle.length
+      while (row > 0 && col > 0) {
+        if (source[row - 1] === needle[col - 1]) {
+          pairs.push([row - 1, col - 1])
+          row -= 1
+          col -= 1
+        } else if (table[(row - 1) * cols + col] >= table[row * cols + (col - 1)]) {
+          row -= 1
+        } else {
+          col -= 1
+        }
+      }
+      return pairs.reverse()
+    }
+
+    /**
+     * Split one line into plain and marked runs, so the reader can see which part
+     * of the poem the wallpaper is currently showing.
+     *
+     * Returns plain strings and `<em>` elements. An exact run wins; failing that,
+     * an alignment that agrees on at least three quarters of the couplet still
+     * marks the corresponding span — that is a textual variant, not a different
+     * poem. Below that threshold the line comes back unmarked rather than guessed
+     * at.
+     */
+    function markLine(line, couplet) {
+      const needle = bareWithMap(couplet).text
+      if (!needle) return [line]
+      const source = bareWithMap(line)
+
+      let from = source.text.indexOf(needle)
+      let length = needle.length
+      if (from < 0) {
+        // Too short to tell a variant from a coincidence.
+        if (needle.length < 8) return [line]
+        const pairs = align(source.text, needle)
+        if (pairs.length < needle.length * 0.75) return [line]
+        from = pairs[0][0]
+        length = pairs[pairs.length - 1][0] - from + 1
+      }
+
+      const start = source.map[from]
+      const end = source.map[from + length - 1] + 1
+      const before = line.slice(0, start)
+      const marked = line.slice(start, end)
+      const after = line.slice(end)
+      return [
+        before || null,
+        h('em', { key: 'mark', style: { fontStyle: 'normal', color: SEAL_INK } }, marked),
+        after || null,
+      ].filter((part) => part !== null)
+    }
+
+    /**
+     * The stamp red, resolved once.
+     *
+     * The layer paints its own paper instead of the app's surfaces — this is a
+     * page of a book, not a dialog — so it cannot borrow the shell's accent.
+     */
+    const SEAL_INK = 'var(--dsh-ipw-seal, #a63b32)'
+
+    const layerFont = {
+      // Long prose never uses the shipped brush faces: those are subset to the
+      // characters the quote pool uses, and a poem's full text runs far past that
+      // subset — a brush face here would show tofu boxes mid-poem.
+      serif: '"Songti SC","Source Han Serif SC","Noto Serif CJK SC",STSong,SimSun,Georgia,serif',
+    }
+
+    /**
+     * The full poem, its poet and its background, as a layer above the wallpaper.
+     *
+     * A separate document (index.js renders one at /ink-poem-wallpaper/poem) is
+     * the natural shape for long prose, but the desktop shell refuses `window.open`
+     * for the `dsh-app:` scheme — the handler only passes http(s) to the system
+     * browser and denies everything else — so a tab would silently do nothing
+     * there. Reading the record and laying it out in the app's own tree works the
+     * same in both hosts, and keeps the wallpaper's paper rather than the shell's
+     * chrome.
+     */
+    function PoemLayer({ quote, titleFamily, onClose }) {
+      const [state, setState] = React.useState({ status: 'loading', record: null })
+      const closeRef = React.useRef(null)
+
+      React.useEffect(() => {
+        let alive = true
+        setState({ status: 'loading', record: null })
+
+        const params = new URLSearchParams({ a: quote.a, t: quote.t })
+        fetch(`${DATA_URL}?${params.toString()}`)
+          .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`)
+            return response.json()
+          })
+          .then((record) => {
+            if (!alive) return
+            // A successful answer with no verses means the poem really is not in
+            // the local library: that is a message for the reader, not a failure.
+            const hasBody = record && (Array.isArray(record.p) ? record.p.length > 0 : false)
+            setState(hasBody
+              ? { status: 'ready', record }
+              : { status: 'empty', record })
+          })
+          .catch(() => {
+            // The JSON route is newer than the page route, so an older Host
+            // process answers 404 for it while still serving the page. Rather
+            // than making the reader restart the app, fall back to the page
+            // itself in a frame — it renders the same records from the same
+            // process, and the shell forwards the request with its credentials.
+            if (alive) setState({ status: 'frame', record: null })
+          })
+
+        return () => { alive = false }
+      }, [quote.a, quote.t])
+
+      React.useEffect(() => {
+        // Escape closes, and the button takes focus so the layer is dismissable
+        // from the keyboard without a tab through the whole page behind it.
+        const onKey = (event) => {
+          if (event.key === 'Escape') {
+            event.stopPropagation()
+            onClose()
+          }
+        }
+        window.addEventListener('keydown', onKey, true)
+        closeRef.current?.focus()
+        return () => window.removeEventListener('keydown', onKey, true)
+      }, [onClose])
+
+      const record = state.record
+      // Every field is read defensively: the layer paints its heading before the
+      // record arrives (and after it turns out to be missing), so `record` is null
+      // for the whole loading and empty states.
+      const paragraphs = record && Array.isArray(record.p) ? record.p : []
+      const biography = (record && record.b) || ''
+      const background = (record && record.bg) || ''
+      const dynasty = (record && record.d) || ''
+
+      const rule = '1px solid var(--dsh-alias-border-l1)'
+
+      const section = (key, title, body) => h('section', {
+        key,
+        style: { marginTop: 34, paddingTop: 20, borderTop: rule },
+      }, [
+        h('h2', {
+          key: 'h',
+          style: {
+            margin: '0 0 12px', fontSize: 11, fontWeight: 600, letterSpacing: '0.3em',
+            textIndent: '0.3em', color: 'var(--dsw-alias-label-secondary)', opacity: 0.85,
+            fontFamily: 'inherit',
+          },
+        }, title),
+        body,
+      ])
+
+      const prose = (text, key) => h('p', {
+        key,
+        style: {
+          margin: 0, fontSize: 14, lineHeight: 2.05, textAlign: 'justify',
+          color: 'var(--dsw-alias-label-secondary)', fontFamily: layerFont.serif,
+        },
+      }, text)
+
+      let body
+      if (state.status === 'loading') {
+        body = h('p', {
+          style: {
+            margin: '36px 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)',
+            opacity: 0.8, fontFamily: layerFont.serif,
+          },
+        }, '正在读诗…')
+      } else if (state.status === 'empty') {
+        body = [
+          h('p', {
+            key: 'lead',
+            style: {
+              margin: '30px 0 0', fontSize: 15, lineHeight: 2, textAlign: 'center',
+              color: 'var(--dsw-alias-label-primary)', fontFamily: layerFont.serif,
+            },
+          }, quote.q),
+          h('p', {
+            key: 'why',
+            style: {
+              margin: '22px auto 0', maxWidth: '30em', fontSize: 13, lineHeight: 2,
+              textAlign: 'center', color: 'var(--dsw-alias-label-secondary)',
+              opacity: 0.85, fontFamily: layerFont.serif,
+            },
+          }, '这首诗的完整正文、作者生平与创作背景没有收进本机的诗库，只能先给你这一联。'
+            + '诗库取自 chinese-poetry，个别篇目与其版本有异文时会对不上，此处不作补写。'),
+        ]
+      } else if (state.status === 'frame') {
+        // No chrome of its own beyond the frame: the page inside already draws
+        // the heading, the poem and the two prose sections, and repeating them
+        // here would read as a duplicate title.
+        body = h('iframe', {
+          key: 'frame',
+          title: '诗的全文与背景',
+          src: `${PAGE_URL}?${new URLSearchParams({ a: quote.a, t: quote.t, q: quote.q }).toString()}`,
+          style: {
+            display: 'block', width: '100%', height: '72vh', border: 0,
+            borderRadius: 10, background: 'transparent',
+          },
+        })
+      } else {
+        body = [
+          paragraphs.length > 0 ? h('div', {
+            key: 'verse',
+            style: { margin: '30px 0 6px', textAlign: 'center' },
+          }, paragraphs.map((line, index) => h('p', {
+            key: `l${index}`,
+            style: {
+              margin: index === paragraphs.length - 1 ? 0 : '0 0 0.55em',
+              fontSize: 17, lineHeight: 2.05, letterSpacing: '0.05em',
+              color: 'var(--dsw-alias-label-primary)', fontFamily: layerFont.serif,
+            },
+          }, markLine(line, quote.q)))) : null,
+          section('bio', '作者', biography
+            ? prose(biography, 'b')
+            : h('p', {
+              key: 'b',
+              style: {
+                margin: 0, fontSize: 13, lineHeight: 2, fontStyle: 'italic',
+                color: 'var(--dsw-alias-label-secondary)', opacity: 0.7,
+                fontFamily: layerFont.serif,
+              },
+            }, '本机诗库里没有这位诗人的小传。')),
+          section('bg', '创作背景', background
+            ? prose(background, 'g')
+            : h('p', {
+              key: 'g',
+              style: {
+                margin: 0, fontSize: 13, lineHeight: 2, fontStyle: 'italic',
+                color: 'var(--dsw-alias-label-secondary)', opacity: 0.7,
+                fontFamily: layerFont.serif,
+              },
+            }, '这首诗的创作背景暂时没有资料，此处不作推测。')),
+          h('p', {
+            key: 'foot',
+            style: {
+              margin: '30px 0 0', fontSize: 11, lineHeight: 1.9, textAlign: 'center',
+              color: 'var(--dsw-alias-label-secondary)', opacity: 0.6,
+              fontFamily: layerFont.serif,
+            },
+          }, '正文、小传与背景取自 chinese-poetry（MIT）；本页由本机数据生成，不联网。'),
+        ].filter(Boolean)
+      }
+
+      const framed = state.status === 'frame'
+
+      return h('div', {
+        'data-dsh-ink-poem-layer': '',
+        role: 'dialog',
+        'aria-modal': true,
+        'aria-label': '诗的全文与背景',
+        // The backdrop both dims the wallpaper and dismisses the layer: the whole
+        // screen outside the sheet is a close target, which is what a reader
+        // expects from a page that covers everything.
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) onClose()
+        },
+        style: {
+          position: 'fixed', inset: 0, zIndex: 4200,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '3vh 20px',
+          background: 'rgba(18,16,13,.42)',
+          backdropFilter: 'blur(2px)',
+          WebkitBackdropFilter: 'blur(2px)',
+        },
+      }, h('div', {
+        // The sheet keeps the wallpaper's paper rather than the shell's surface:
+        // this is a page of a book laid over the app, not a settings dialog.
+        style: {
+          position: 'relative', width: framed ? 'min(760px, 100%)' : 'min(720px, 100%)',
+          maxHeight: '94vh',
+          overflowY: 'auto', overscrollBehavior: 'contain',
+          padding: framed ? '44px 18px 18px' : '52px 40px 44px', borderRadius: 14,
+          border: rule,
+          background: 'var(--dsw-alias-bg-overlay)',
+          boxShadow: '0 28px 72px rgba(0,0,0,.34)',
+          color: 'var(--dsw-alias-label-primary)',
+        },
+      }, [
+        h('button', {
+          key: 'x',
+          ref: closeRef,
+          type: 'button',
+          'aria-label': '关闭',
+          onClick: onClose,
+          style: {
+            position: 'absolute', top: 12, right: 12,
+            width: 26, height: 26, padding: 0, borderRadius: 7, cursor: 'pointer',
+            border: rule, background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-secondary)',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            // Above the frame, which would otherwise paint over the button.
+            zIndex: 1,
+          },
+        }, h(Glyph, { path: GLYPH.close })),
+        // The framed page brings its own heading, so drawing ours as well would
+        // read as the same title twice on one screen.
+        framed ? null : h('header', {
+          key: 'head',
+          style: { textAlign: 'center', paddingBottom: 20, borderBottom: rule },
+        }, [
+          dynasty ? h('p', {
+            key: 'd',
+            style: {
+              margin: '0 0 10px', fontSize: 11, letterSpacing: '0.4em',
+              textIndent: '0.4em', color: 'var(--dsw-alias-label-secondary)', opacity: 0.8,
+              fontFamily: layerFont.serif,
+            },
+          }, dynasty) : null,
+          h('h1', {
+            key: 't',
+            style: {
+              margin: 0, fontSize: 30, fontWeight: 400, lineHeight: 1.4,
+              letterSpacing: '0.06em',
+              // The title's characters are guaranteed by the font filter, which
+              // rejects any quote whose title the shipped faces cannot draw — so
+              // the brush face is safe here even though the body text is not.
+              fontFamily: `${titleFamily},${layerFont.serif}`,
+            },
+          }, (record && record.t) || quote.t),
+          h('p', {
+            key: 'a',
+            style: {
+              margin: '10px 0 0', fontSize: 13, letterSpacing: '0.28em',
+              textIndent: '0.28em', color: 'var(--dsw-alias-label-secondary)',
+              fontFamily: layerFont.serif,
+            },
+          }, (record && record.a) || quote.a),
+        ].filter(Boolean)),
+        ...(Array.isArray(body) ? body : [body]),
+      ]))
+    }
+
+    /* ================================================================== *
      * The wallpaper
      * ================================================================== */
 
@@ -987,6 +1392,15 @@ window.__ModuleLoader__.load({
       const [hasBrushFace] = React.useState(brushFaceAvailable)
       // The control row stays out of sight until the pointer reaches it.
       const [controlsShown, setControlsShown] = React.useState(false)
+      /**
+       * Whether the full-poem layer is showing.
+       *
+       * Not a new tab: the desktop shell denies `window.open` for every scheme but
+       * http(s), and the app itself runs on `dsh-app:`, so a tab would do nothing
+       * there. The layer is a page of its own inside this tree instead, which the
+       * browser and the shell render identically.
+       */
+      const [poemOpen, setPoemOpen] = React.useState(false)
       // Live size of the verse block, used to clamp a dragged block to the viewport.
       // A ref (not state) so measuring does not re-render on every frame.
       const measuredRef = React.useRef(null)
@@ -1449,6 +1863,17 @@ body.dsh-ipw-active[data-ds-dark-theme] {
       const step = (delta) => update({ offset: (index + delta) - today, pinnedDay: today })
       const reset = () => update({ offset: null, pinnedDay: null })
 
+      /**
+       * Show the poem's full text, the poet's life, and what is known about why
+       * the poem was written.
+       *
+       * All of that belongs in prose — it would swamp a wallpaper — so it opens
+       * as a layer above the verse (see `PoemLayer`). The record itself is read
+       * from the Host half, which parses `data/details.json` once per process.
+       */
+      const showPoem = React.useCallback(() => setPoemOpen(true), [])
+      const hidePoem = React.useCallback(() => setPoemOpen(false), [])
+
       // --- independent seal placement -------------------------------------
       // The stamp is dragged and scaled on its own, so it can sit anywhere the poem
       // does not: a stamp belongs in a margin, not necessarily under the signature.
@@ -1603,6 +2028,13 @@ body.dsh-ipw-active[data-ds-dark-theme] {
                   'aria-expanded': open, onClick: () => setOpen((value) => !value),
                   style: open ? { ...chipStyle, background: 'var(--dsw-alias-bg-layer-2)' } : chipStyle,
                 }, h(Glyph, { path: GLYPH.gear })),
+                // Opens the layer holding the poem's full text, the poet's life
+                // and its background: prose that would swamp a wallpaper.
+                h('button', {
+                  key: 'd', type: 'button', title: '查看整首诗', 'aria-label': '查看整首诗',
+                  'aria-expanded': poemOpen, onClick: showPoem,
+                  style: { ...chipStyle, width: 26, padding: 0 },
+                }, h(Glyph, { path: GLYPH.page })),
                 pinned ? h('button', {
                   key: 'r', type: 'button',
                   title: '回到今天的句子（手动选择次日自动恢复）',
@@ -1795,6 +2227,13 @@ body.dsh-ipw-active[data-ds-dark-theme] {
             },
           }, '本机没有安装行楷，诗句会退回楷体；草书 / 行草 / 行书三款是随插件附带的，不受影响。'),
         ]) : null,
+
+        poemOpen ? h(PoemLayer, {
+          key: 'poem',
+          quote,
+          titleFamily: fontFamily(settings.font),
+          onClose: hidePoem,
+        }) : null,
       ].filter(Boolean))
     }
 
